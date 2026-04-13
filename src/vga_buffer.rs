@@ -1,5 +1,8 @@
-use core::fmt;
+use crate::instrinsics::{Lazy, Volatile};
 
+/// A global `Writer` instance that can be used for printing to the VGA text buffer.
+///
+/// Used by the `print!` and `println!` macros.
 pub static mut WRITER: Lazy<Writer> = Lazy::new(|| Writer {
     column_position: 0,
     color_code: ColorCode::new(Color::Yellow, Color::Black),
@@ -109,6 +112,7 @@ impl Writer {
         }
     }
 
+    /// Shifts all lines one line up and clears the last row.
     fn new_line(&mut self) {
         for row in 1..BUFFER_HEIGHT {
             for col in 0..BUFFER_WIDTH {
@@ -120,6 +124,7 @@ impl Writer {
         self.column_position = 0;
     }
 
+    /// Clears a row by overwriting it with blank characters.
     fn clear_row(&mut self, row: usize) {
         let blank = ScreenChar {
             ascii_character: b' ',
@@ -131,14 +136,14 @@ impl Writer {
     }
 }
 
-impl fmt::Write for Writer {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
+impl core::fmt::Write for Writer {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
         self.write_string(s);
         Ok(())
     }
 }
 
-pub fn _print(args: fmt::Arguments) {
+pub fn _print(args: core::fmt::Arguments) {
     use core::fmt::Write;
     unsafe {
         #[allow(static_mut_refs)]
@@ -163,134 +168,29 @@ macro_rules! println {
     };
 }
 
-#[derive(Debug)]
-#[repr(transparent)]
-struct Volatile<T: Copy>(T);
+#[cfg(test)]
+mod tests {
+    use crate::vga_buffer::BUFFER_HEIGHT;
 
-#[allow(dead_code)]
-impl<T: Copy> Volatile<T> {
-    fn new(value: T) -> Self {
-        Self(value)
+    #[test_case]
+    fn println_simple() {
+        println!("test_println_simple output");
     }
 
-    fn read(&self) -> T {
-        unsafe { core::ptr::read_volatile(&self.0) }
-    }
-
-    fn write(&mut self, value: T) {
-        unsafe { core::ptr::write_volatile(&mut self.0, value) };
-    }
-}
-
-impl<T: Copy + Default> Default for Volatile<T> {
-    fn default() -> Self {
-        Self(T::default())
-    }
-}
-
-use core::cell::{Cell, UnsafeCell};
-
-struct OnceCell<T> {
-    // Invariant: written to at most once.
-    inner: UnsafeCell<Option<T>>,
-}
-
-// No threads nor CPU interrupts at this stage so lying to the compiler is fine.
-unsafe impl<T> Send for OnceCell<T> {}
-unsafe impl<T> Sync for OnceCell<T> {}
-
-#[allow(dead_code)]
-impl<T> OnceCell<T> {
-    const fn new() -> Self {
-        Self {
-            inner: UnsafeCell::new(None),
+    #[test_case]
+    fn println_many() {
+        for _ in 0..200 {
+            println!("test_println_many output");
         }
     }
 
-    pub fn get(&self) -> Option<&T> {
-        unsafe { &*self.inner.get() }.as_ref()
-    }
-
-    pub fn get_mut(&mut self) -> Option<&mut T> {
-        self.inner.get_mut().as_mut()
-    }
-
-    pub fn set(&self, value: T) -> Result<(), T> {
-        if self.get().is_some() {
-            return Err(value);
+    #[test_case]
+    fn println_output() {
+        let s = "Some test string that fits on a single line";
+        println!("{s}");
+        for (i, c) in s.chars().enumerate() {
+            let screen_char = unsafe { super::WRITER.buffer.chars[BUFFER_HEIGHT - 2][i].read() };
+            assert_eq!(char::from(screen_char.ascii_character), c);
         }
-        unsafe { *self.inner.get() = Some(value) };
-        Ok(())
-    }
-
-    /// The reentrant case is allowed and is UB. An `intialising` flag can be used in the future.
-    /// ```
-    /// let cell = OnceCell::new();
-    /// let x = cell.get_or_init(|| {
-    ///     cell.get_or_init(|| 2);
-    ///     1
-    /// });
-    /// assert_eq!(x, 1);
-    /// ```
-    pub fn get_or_init(&self, f: impl FnOnce() -> T) -> &T {
-        if let Some(value) = self.get() {
-            return value;
-        }
-        unsafe {
-            *self.inner.get() = Some(f());
-            self.get().unwrap_unchecked()
-        }
-    }
-
-    /// The reentrant case is statically impossible since we would be borrowing `&mut self` more
-    /// than once at a time and the compiler makes sure the invariant holds.
-    pub fn get_mut_or_init(&mut self, f: impl FnOnce() -> T) -> &mut T {
-        self.inner.get_mut().get_or_insert_with(f)
-    }
-}
-
-pub struct Lazy<T, F = fn() -> T> {
-    cell: OnceCell<T>,
-    init: Cell<Option<F>>,
-}
-
-// No threads nor CPU interrupts at this stage so lying to the compiler is fine.
-unsafe impl<T> Send for Lazy<T> {}
-unsafe impl<T> Sync for Lazy<T> {}
-
-impl<T, F: FnOnce() -> T> Lazy<T, F> {
-    const fn new(init: F) -> Self {
-        Self {
-            cell: OnceCell::new(),
-            init: Cell::new(Some(init)),
-        }
-    }
-
-    pub fn force(this: &Lazy<T, F>) -> &T {
-        this.cell.get_or_init(|| match this.init.take() {
-            Some(f) => f(),
-            None => unreachable!(),
-        })
-    }
-
-    pub fn force_mut(this: &mut Lazy<T, F>) -> &mut T {
-        this.cell.get_mut_or_init(|| match this.init.take() {
-            Some(f) => f(),
-            None => unreachable!(),
-        })
-    }
-}
-
-impl<T, F: FnOnce() -> T> core::ops::Deref for Lazy<T, F> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        Lazy::force(self)
-    }
-}
-
-impl<T, F: FnOnce() -> T> core::ops::DerefMut for Lazy<T, F> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        Lazy::force_mut(self)
     }
 }
